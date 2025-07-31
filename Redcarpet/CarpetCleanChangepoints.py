@@ -27,7 +27,7 @@
 # Contrubitors: Arnav Lal
 # Contrubitors: Ahmed M Moustafa
 
-# AFFILIATION: Pediatric Infectious Disease Division, Children’s Hospital of Philadelphia,
+# AFFILIATION: Pediatric Infectious Disease Division, Children's Hospital of Philadelphia,
 # Abramson Pediatric Research Center, University of Pennsylvania, Philadelphia,
 # Pennsylvania, 19104, USA
 
@@ -50,6 +50,7 @@ from tqdm import tqdm
 import argparse
 import sklearn
 from sklearn.neighbors import KDTree
+import subprocess
 
 # %%functions for commandline arguments
 # where you add the parameters for your script
@@ -59,34 +60,79 @@ Once each chunk is processed, the changepoints from all chunks are merged and so
 This sorted list if called all_change_points and is used to visualize the changepoints on the heatmap and line plot.
 """
 
-# --file_path: Path to the input file.
-# to run the script use the following command (example):
-# python main.py -i /path/to/your_dataset.txt -o /path/to/output_directory --num_chunks 1
-# make sure you are cd into the directory where the main.py file is located
-# the file path should be the path to the dataset you want to analyze
-# num_chunks is the number of chunks you want to split the dataset into
+# Command line arguments:
+# --mode: Processing mode - either 'single' for single file or 'batch' for folder processing
+# -i, --input_heatmap: Path to the input heatmap file (required for single mode)
+# -o, --output_directory: Directory for storing output files (will return the directory of the input file if not provided; Recommended for batch mode)
+# --input_folder: Path to the input folder containing multiple files (required for batch mode)
+# --similarity_threshold: P-value threshold to determine similarity (optional, default: 0.05)
+# --k_neighbors: Number of closest neighbors to compare (optional, default: 5)
+# --num_chunks: Number of chunks to split the data into (optional, default: 10)
+
+# SINGLE FILE MODE - to run the script use the following command (examples):
+# python main.py --mode single -i /path/to/your_dataset.txt -o /path/to/output_directory
+
+# BATCH PROCESSING MODE - to run the script use the following command (examples):
+# python main.py --mode batch --input_folder /path/to/folder_with_datasets -o /path/to/output_directory
+
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Change Point Detection")
-    parser.add_argument("-i", "--input_heatmap", type=str, required=True, help="Path to the input heatmap file.")
-    parser.add_argument("-o", "--output_directory", type=str, required=True, help="Directory for storing output files.")
-    return parser.parse_args()
+    """
+    Parse command line arguments for both single file processing and batch processing modes.
+    """
+    parser = argparse.ArgumentParser(description="Change Point Detection - Single File or Batch Processing")
 
-    parser = argparse.ArgumentParser(description="Change Point Detection")
-    parser.add_argument("--file_path", type=str, required=True, help="Path to the input file.")
-    parser.add_argument("--num_chunks", type=int, default=10, help="Number of chunks to split the data into.")
-    return parser.parse_args()
+    # Mode selection
+    parser.add_argument("--mode", type=str, choices=["single", "batch"], required=True,
+                        help="Processing mode: 'single' for single file, 'batch' for folder processing")
 
+    # Single file mode arguments
+    parser.add_argument("-i", "--input_heatmap", type=str,
+                        help="Path to the input heatmap file (required for single mode).")
+    parser.add_argument("-o", "--output_directory", type=str, required=False,
+                        help="Directory for storing output files. If not provided, uses the directory of the input file.")
+
+    # Batch mode arguments
+    parser.add_argument("--input_folder", type=str,
+                        help="Path to the input folder containing multiple files (required for batch mode).")
+
+    # Optional parameters
+    parser.add_argument("--num_chunks", type=int, default=10,
+                        help="Number of chunks to split the data into.")
+    parser.add_argument("--similarity_threshold", type=float, default=0.05,
+                        help="P-value threshold to determine similarity.")
+    parser.add_argument("--k_neighbors", type=int, default=5,
+                        help="Number of closest neighbors to compare.")
+
+    args = parser.parse_args()
+
+    # Validate arguments based on mode
+    if args.mode == "single" and not args.input_heatmap:
+        parser.error("Single mode requires --input_heatmap (-i) argument")
+    if args.mode == "batch" and not args.input_folder:
+        parser.error("Batch mode requires --input_folder argument")
+
+    # Set output directory to input file's directory if not provided
+    if args.mode == "single" and not args.output_directory:
+        if args.input_heatmap:
+            args.output_directory = os.path.dirname(os.path.abspath(args.input_heatmap))
+            print(f"No output directory specified. Using input file directory: {args.output_directory}")
+
+    if args.mode == "batch" and not args.output_directory:
+        if args.input_folder:
+            args.output_directory = os.path.dirname(os.path.abspath(args.input_folder))
+            print(f"No output directory specified. Using input folder's parent directory: {args.output_directory}")
+
+    return args
 
 # function to detect change points in the dataset using the ruptures library
 def detect_change_points(data_chunk):
-    num_proteins = 1000
-        #data_chunk.shape)[0]
+    num_proteins = data_chunk.shape[0]
+    # data_chunk.shape[0]
     # Scale penalty: base value + a factor of protein count
     penalty = (num_proteins * 1)  # Supposed to be Y = M * X + B but ended up as Y = X (M * X)
     algo = rpt.KernelCPD(kernel="linear").fit(data_chunk)
     return algo.predict(pen=penalty)
-
 
 
 # function to calculate pairwise comparisons between all regions in the dataset
@@ -189,6 +235,7 @@ def write_change_points_to_file(results, file_path, data_chunk, data_length):
 
     return regions
 
+
 def write_similar_regions_to_file(similar_regions, file_path):
     with open(file_path, 'w') as file:
         file.write("Similar Regions:\n")
@@ -208,14 +255,14 @@ def write_all_region_comparisons_to_file(all_region_comparisons, file_path):
 def merge_adjacent_similar_regions(data, regions, similarity_threshold=0.05):
     merged_regions = []
     i = 0
-    while i < len(regions): # Check if there are more regions to process
-        start1, end1, data1 = regions[i] # Get the current region
+    while i < len(regions):  # Check if there are more regions to process
+        start1, end1, data1 = regions[i]  # Get the current region
 
-        while i + 1 < len(regions): # Check if there is a next region
-            start2, end2, data2 = regions[i + 1] # Get the next region
+        while i + 1 < len(regions):  # Check if there is a next region
+            start2, end2, data2 = regions[i + 1]  # Get the next region
 
-            if end1 + 1 == start2: # Check if regions are adjacent
-                region1_data, region2_data = pad_to_same_length(data1, data2) # Pad the data to the same length
+            if end1 + 1 == start2:  # Check if regions are adjacent
+                region1_data, region2_data = pad_to_same_length(data1, data2)  # Pad the data to the same length
                 t_stats, p_values = ttest_ind(region1_data.T, region2_data.T, axis=1, nan_policy='omit')
                 avg_p_value = np.nanmean(p_values) if p_values.size > 0 else float('inf')
 
@@ -271,23 +318,22 @@ def process_chunk_parallel(data_chunk):
     return detect_change_points(data_chunk)
 
 
-def main():
+# %%Core processing function - processes single file for change point detection
+def process_single_file(input_file, output_directory, similarity_threshold=0.05, k_neighbors=5):
+    """
+    Process a single input file for change point detection.
+    """
     start_time = time.time()  # Track total execution time
 
-    args = parse_arguments()
-
     try:
-        input_heatmap = args.input_heatmap
-        output_directory = args.output_directory
-
-        redcarpet = pd.read_csv(input_heatmap, sep='\t')  # load the dataset
+        redcarpet = pd.read_csv(input_file, sep='\t')  # load the dataset
         redcarpet_npy = redcarpet.to_numpy().astype('float')  # convert the dataset to a numpy array
         num_proteins = redcarpet_npy.shape[0]  # Number of proteins
 
         print("Data loaded successfully.")
     except Exception as e:
         print(f"Error loading data: {e}")
-        return
+        return False
 
     data_length = redcarpet_npy.shape[1]
 
@@ -302,7 +348,7 @@ def main():
         print("Dataset processed.")
     except Exception as e:
         print(f"Error processing dataset: {e}")
-        return
+        return False
 
     plt.figure(figsize=(20, 20))  # plot the heatmap of the dataset with the detected change points
 
@@ -364,13 +410,14 @@ def main():
 
     print("Finding similar regions using comparisons...")
     # The following 5 lines calculate the pairwise comparisons between all regions in the dataset and write the similar regions and all region comparisons to a file in the same directory as the dataset
-    all_region_comparisons, similar_regions, jaccard_operations = find_similar_regions(redcarpet_npy, regions)
+    all_region_comparisons, similar_regions, jaccard_operations = find_similar_regions(redcarpet_npy, regions,
+                                                                                       similarity_threshold,
+                                                                                       k_neighbors)
     similar_regions_file_path = os.path.join(directory, 'similar_regions.txt')
     write_similar_regions_to_file(similar_regions, similar_regions_file_path)
     all_region_comparisons_file_path = os.path.join(directory, 'all_region_comparisons.txt')
     write_all_region_comparisons_to_file(all_region_comparisons, all_region_comparisons_file_path)
     print("Similar regions and all region comparisons written to file.")
-
 
     total_time = time.time() - start_time
 
@@ -400,6 +447,81 @@ def main():
 
     print(f"Merged regions written to {merged_regions_file_path}")
 
+    return True
+
+
+# %%Batch processing functions
+# This script processes either a single file or all files inside a folder
+# by running a specified external Python script on each input file.
+# Example usage: python3 script.py /path/to/input /path/to/output /path/to/your_script.py
+
+def process_folder(input_folder, output_directory, similarity_threshold=0.05, k_neighbors=5):
+    """
+    Arguments:
+        input_folder (str): Path to the input folder.
+        output_directory (str): Path to the output directory where results will be saved.
+        similarity_threshold (float): P-value threshold for similarity detection.
+        k_neighbors (int): Number of nearest neighbors for comparison.
+    """
+    # Create the main output directory if it doesn't exist
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
+
+    # Collect all file paths inside the input folder (ignore directories)
+    input_files = [os.path.join(input_folder, f) for f in os.listdir(input_folder) if
+                   os.path.isfile(os.path.join(input_folder, f))]
+
+    # Process each file individually
+    for file in input_files:
+        try:
+            # Extract the base file name (without extension) to create a unique output subdirectory
+            file_name = os.path.splitext(os.path.basename(file))[0]
+            genome_output_dir = os.path.join(output_directory, file_name)
+
+            # Create the output subdirectory if it doesn't exist
+            if not os.path.exists(genome_output_dir):
+                os.makedirs(genome_output_dir)
+
+            # Process the file using the single file processing function
+            success = process_single_file(file, genome_output_dir, similarity_threshold, k_neighbors)
+
+            if success:
+                print(f"Successfully processed: {file}")
+            else:
+                print(f"Failed to process: {file}")
+
+        except Exception as e:
+            # Catch and report any errors that occur while processing the file
+            print(f"Error processing {file}: {e}")
+
+
+def main():
+    # Parses command-line arguments and initiates processing based on whether the input is a file or a folder.
+    args = parse_arguments()
+
+    if args.mode == "single":
+        print(f"Running in SINGLE FILE mode")
+        success = process_single_file(
+            args.input_heatmap,
+            args.output_directory,
+            args.similarity_threshold,
+            args.k_neighbors
+        )
+
+        if success:
+            print("Single file processing completed successfully!")
+        else:
+            print("Single file processing failed!")
+
+    elif args.mode == "batch":
+        print(f"Running in BATCH PROCESSING mode")
+
+        # Check if the input path is a directory (folder) or a single file
+        if os.path.isdir(args.input_folder):
+            print(f"Processing folder: {args.input_folder}")
+            process_folder(args.input_folder, args.output_directory, args.similarity_threshold, args.k_neighbors)
+        else:
+            print("Invalid input path. Please provide a valid folder for batch mode.")
 
 
 if __name__ == "__main__":
