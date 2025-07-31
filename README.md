@@ -73,8 +73,8 @@ To process multiple Redcarpet reports in a folder simultaneously:
 
 --k_neighbors : Number of nearest neighbors to compare for efficiency (default: 5, higher = more comparisons)
 
---num_chunks : Number of chunks to split data into (default: 10)```
-
+--num_chunks : Number of chunks to split data into (default: 10)
+```
 
 The output will have different regions of the genome with the changepoints identified. Additionally, information about which regions are similar will be provided.
 
