@@ -5,3 +5,5 @@ numpy>=1.22
 scipy>=1.8
 tqdm>=4.64
 scikit-learn>=1.0
+snakemake>=7.32
+lmdb>=1.4

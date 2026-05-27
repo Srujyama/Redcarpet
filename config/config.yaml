@@ -1,0 +1,76 @@
+# ============================================================================
+# Redcarpet Snakemake pipeline configuration
+# ============================================================================
+# The pipeline runs, per query genome:
+#   1. preflight   — verify the DB is present and inputs are protein FASTA
+#   2. whatsgnu    — produce a per-protein hits file (genome IDs per allele)
+#   3. redcarpet   — N×N Jaccard similarity matrix from the hits file
+#   4. changepoints — CarpetCleanChangepoints region detection on that matrix
+#
+# It does NOT download databases or annotate genomes. Those are your
+# responsibility; preflight only verifies they are in place.
+# ============================================================================
+
+# ---- Which WhatsGNU to use ----
+# "atb"     : new WhatsGNU-ATB (2.4M AllTheBacteria genomes, LMDB database).
+# "classic" : original WhatsGNU with a per-species Ortholog pickle DB.
+whatsgnu_backend: "atb"
+
+# ---- Inputs (shared by both backends) ----
+# Folder containing one or more Bakta protein FASTA files (*.faa).
+# Each *.faa is processed independently into its own results subfolder.
+faa_dir: "data/faa"
+
+# Where all outputs go. One subfolder per genome is created under results/.
+results_dir: "results"
+
+# ---- Backend: atb (new WhatsGNU-ATB) ----
+atb:
+  # Root of the downloaded WGNU_ATB_DB (contains lmdb_counts/, lmdb_postings/,
+  # indexes/genome_species.u32). Download with:
+  #   python WhatsGNU-ATB/scripts/download_osf.py --folder WGNU_ATB_DB --out-dir <db_dir>
+  db_dir: "WGNU_ATB_DB"
+  # Number of shards the DB was built with (power of 2). The published DB = 8.
+  shards: 8
+  # Optional: samples_with_ids.tsv enables genome/species names in similarity.tsv.
+  # Leave blank to skip (GNU scores + Redcarpet still work without it).
+  samples_tsv: ""        # e.g. "WGNU_ATB_DB/samples_with_ids.tsv"
+  species_names_tsv: ""  # e.g. "WGNU_ATB_DB/samples_with_ids.tsv"
+  top_k_species: 5
+  top_k_genomes: 10
+  # 0 = decode all postings (required for correct Jaccard sets in Redcarpet).
+  postings_limit: 0
+
+# ---- Backend: classic (original WhatsGNU) ----
+classic:
+  # Path to the WhatsGNU repo clone (provides bin/WhatsGNU_main.py).
+  whatsgnu_dir: "WhatsGNU"
+  # Full path to the Ortholog database pickle for your species (not derived
+  # from whatsgnu_dir — give the complete path).
+  pickle: "whatsgnu_db/WhatsGNU_Sau_Ortholog/Sau_Ortholog_10350.pickle"
+  # Database mode passed to WhatsGNU_main.py. Ortholog DBs use string strain
+  # names, so a strain->int hash file is built automatically before Redcarpet.
+  database_mode: "ortholog"
+
+# ---- Redcarpet ----
+redcarpet:
+  # Which matrix engine to use:
+  #   "fast"     : workflow/scripts/redcarpet_fast.py — a vectorized (sparse
+  #                Mᵀ·M) reimplementation that is BYTE-IDENTICAL to the original
+  #                (verified by matching SHA-256 on both classic and ATB data)
+  #                but ~5× faster on classic data and ~30×+ faster at ATB scale
+  #                (4 min vs >2 h for one S. aureus genome). Recommended.
+  #   "original" : the upstream Redcarpet_01062025.py at `script` below
+  #                (maintained separately, not in this repo). Same output, slow.
+  engine: "fast"
+  # Path to the original Redcarpet matrix script (only used when engine=original).
+  script: "scripts/Redcarpet_01062025.py"
+  # bottom_k cutoff for hits. 0/empty => use all hits (Redcarpet "bk_all").
+  # At ATB scale you can also cap per-protein genome sets here to speed up the
+  # original engine; the fast engine is quick enough that bk_all is fine.
+  bottom_k: 0
+
+# ---- CarpetCleanChangepoints ----
+changepoints:
+  similarity_threshold: 0.05
+  k_neighbors: 5
