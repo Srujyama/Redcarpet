@@ -1,3 +1,29 @@
+# Snakemake pipeline outputs / state
+results*/
+.snakemake/
+
+# Local e2e/test configs (the committed config is config/config.yaml)
+config/e2e_*.yaml
+config/test_*.yaml
+
+# Claude local state
+.claude/
+
+# Databases (large; user-downloaded) and intermediate run dirs.
+# Patterns without trailing slash so they also match symlinks to external copies.
+WGNU_ATB_DB
+WGNU_ATB_DB/
+whatsgnu_db
+whatsgnu_db/
+synth_atb_db/
+
+# External tool clones / scripts pulled in for local verification (not part of repo)
+WhatsGNU
+WhatsGNU/
+WhatsGNU-ATB
+WhatsGNU-ATB/
+scripts/Redcarpet_01062025.py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -12,3 +12,7 @@ dependencies:
   - tqdm>=4.64
   - ruptures>=1.1
   - scikit-learn>=1.0
+  # Pipeline orchestration
+  - snakemake-minimal>=7.32
+  # WhatsGNU-ATB backend (LMDB-backed query); harmless if you only use classic
+  - python-lmdb>=1.4

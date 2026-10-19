@@ -1,0 +1,287 @@
+# ============================================================================
+# Redcarpet pipeline (Snakemake)
+#
+#   .faa  ->  WhatsGNU hits file  ->  Redcarpet Jaccard matrix  ->  changepoints
+#
+# Two interchangeable WhatsGNU backends, selected by config["whatsgnu_backend"]:
+#   "atb"     : new WhatsGNU-ATB (2.4M AllTheBacteria genomes). Uses the vendored
+#               patched query script with --dump_hits to emit the hits file.
+#   "classic" : original WhatsGNU + Ortholog pickle. Emits hits via -i, then maps
+#               strain names to integer IDs for Redcarpet.
+#
+# Run:
+#   snakemake --use-conda --cores 4
+#   snakemake -n            # dry run / show plan
+# ============================================================================
+
+import os
+from pathlib import Path
+
+configfile: "config/config.yaml"
+
+BACKEND      = config["whatsgnu_backend"]
+FAA_DIR      = Path(config["faa_dir"])
+RESULTS      = Path(config["results_dir"])
+SCRIPTS      = Path(workflow.basedir) / "scripts"   # workflow/scripts/
+
+if BACKEND not in ("atb", "classic"):
+    raise WorkflowError(
+        f"whatsgnu_backend must be 'atb' or 'classic', got {BACKEND!r}")
+
+# ---- Discover query genomes ------------------------------------------------
+# One sample per *.faa in faa_dir. The sample name keeps the full filename
+# (incl. .faa) stripped of extension only for the wildcard, so downstream
+# names stay readable.
+def discover_samples():
+    if not FAA_DIR.is_dir():
+        raise WorkflowError(f"faa_dir not found: {FAA_DIR}")
+    faas = sorted(p.name for p in FAA_DIR.iterdir()
+                  if p.is_file() and p.name.endswith(".faa"))
+    if not faas:
+        raise WorkflowError(f"No .faa files found in {FAA_DIR}")
+    mapping = {}
+    for f in faas:
+        stem = Path(f).stem   # "NCTC8325.faa" -> "NCTC8325"
+        if stem in mapping:
+            raise WorkflowError(
+                f"Two inputs map to the same sample name {stem!r}: "
+                f"{mapping[stem]!r} and {f!r}. Rename one.")
+        mapping[stem] = f
+    return mapping
+
+SAMPLES = discover_samples()
+
+def faa_path(sample):
+    return str(FAA_DIR / SAMPLES[sample])
+
+# Per-sample output locations.
+def sample_dir(sample):
+    return RESULTS / sample
+
+# ---- Final targets ---------------------------------------------------------
+rule all:
+    input:
+        expand(str(RESULTS / "{sample}" / "carpet" / "Information.txt"),
+               sample=SAMPLES.keys())
+
+
+# ---- Preflight: verify DB present + input is protein FASTA ------------------
+# Per-sample so that adding a new *.faa later always gets validated (a single
+# global sentinel would be skipped on re-runs). The DB check is cheap to repeat;
+# the faa check covers exactly this sample's input.
+rule preflight:
+    input:
+        faa = lambda wc: faa_path(wc.sample),
+    output:
+        ok = touch(RESULTS / "{sample}" / ".preflight.ok")
+    params:
+        backend = BACKEND,
+        # atb
+        db_dir  = config.get("atb", {}).get("db_dir", ""),
+        shards  = config.get("atb", {}).get("shards", 8),
+        # classic
+        pickle  = config.get("classic", {}).get("pickle", ""),
+        script  = str(SCRIPTS / "preflight.py"),
+    run:
+        if params.backend == "atb":
+            shell(
+                "python {params.script} --backend atb "
+                "--db_dir {params.db_dir} --shards {params.shards} "
+                "--faa_dir {input.faa} --touch {output.ok}"
+            )
+        else:
+            shell(
+                "python {params.script} --backend classic "
+                "--pickle {params.pickle} "
+                "--faa_dir {input.faa} --touch {output.ok}"
+            )
+
+
+# ============================================================================
+# WhatsGNU — produces results/{sample}/{sample}.WhatsGNU_hits.txt
+# Exactly one of the two rules below is active per run (backend switch).
+# ============================================================================
+
+if BACKEND == "atb":
+
+    rule whatsgnu_atb:
+        input:
+            faa = lambda wc: faa_path(wc.sample),
+            ok  = rules.preflight.output.ok,
+        output:
+            hits = RESULTS / "{sample}" / "{sample}.WhatsGNU_hits.txt",
+            tsv  = RESULTS / "{sample}" / "{sample}.faa.whatsgnu.tsv",
+        params:
+            query   = str(SCRIPTS / "Query_WhatsGNU_ATB.py"),
+            db_dir  = config["atb"]["db_dir"],
+            shards  = config["atb"]["shards"],
+            out_dir = lambda wc: str(sample_dir(wc.sample)),
+            top_k_species = config["atb"]["top_k_species"],
+            top_k_genomes = config["atb"]["top_k_genomes"],
+            postings_limit = config["atb"]["postings_limit"],
+            samples_tsv = config["atb"].get("samples_tsv", ""),
+            species_tsv = config["atb"].get("species_names_tsv", ""),
+        log:
+            RESULTS / "{sample}" / "logs" / "whatsgnu_atb.log"
+        shell:
+            r"""
+            mkdir -p $(dirname {log})
+            extra=""
+            if [ -n "{params.samples_tsv}" ]; then extra="$extra --samples_tsv {params.samples_tsv}"; fi
+            if [ -n "{params.species_tsv}" ]; then extra="$extra --species_names_tsv {params.species_tsv}"; fi
+            python {params.query} \
+                --db_dir {params.db_dir} \
+                --shards {params.shards} \
+                --faa {input.faa} \
+                --out_dir {params.out_dir} \
+                --with_postings \
+                --postings_limit {params.postings_limit} \
+                --top_k_species {params.top_k_species} \
+                --top_k_genomes {params.top_k_genomes} \
+                --dump_hits {output.hits} \
+                $extra \
+                > {log} 2>&1
+            """
+
+else:  # classic
+
+    rule whatsgnu_classic:
+        input:
+            faa = lambda wc: faa_path(wc.sample),
+            ok  = rules.preflight.output.ok,
+        output:
+            hits = RESULTS / "{sample}" / "{sample}.WhatsGNU_hits.txt",
+        params:
+            whatsgnu_dir = config["classic"]["whatsgnu_dir"],
+            pickle  = config["classic"]["pickle"],
+            dm      = config["classic"]["database_mode"],
+            out_dir = lambda wc: str(sample_dir(wc.sample) / "whatsgnu_out"),
+            make_hash = str(SCRIPTS / "make_hash_file.py"),
+        log:
+            RESULTS / "{sample}" / "logs" / "whatsgnu_classic.log"
+        shell:
+            r"""
+            mkdir -p $(dirname {log}) {params.out_dir}
+            python {params.whatsgnu_dir}/bin/WhatsGNU_main.py \
+                -d {params.pickle} \
+                -dm {params.dm} -i --force \
+                -o {params.out_dir} \
+                {input.faa} > {log} 2>&1
+            # WhatsGNU names the hits file <input_basename>_WhatsGNU_hits.txt.
+            src=$(ls {params.out_dir}/*_WhatsGNU_hits.txt | head -1)
+            cp "$src" {output.hits}
+            """
+
+    # Ortholog hits use string strain names; Redcarpet needs integer IDs.
+    rule classic_hash_file:
+        input:
+            hits = rules.whatsgnu_classic.output.hits,
+        output:
+            csv = RESULTS / "{sample}" / "{sample}.strain_hashes.csv",
+        params:
+            make_hash = str(SCRIPTS / "make_hash_file.py"),
+        shell:
+            "python {params.make_hash} {input.hits} {output.csv}"
+
+
+# ============================================================================
+# Redcarpet — N×N Jaccard matrix from the hits file
+# ============================================================================
+def redcarpet_extra_inputs(wc):
+    """classic backend additionally needs the strain-hash CSV."""
+    if BACKEND == "classic":
+        return {"hash_csv": str(RESULTS / wc.sample / f"{wc.sample}.strain_hashes.csv")}
+    return {}
+
+# Redcarpet derives its report name from the input file: it strips the
+# "WhatsGNU_hits.txt" suffix and appends "bk_all_" (all hits) or "bk_<N>_".
+# Our input is named "<sample>.WhatsGNU_hits.txt", so the report is
+# "<sample>.bk_all_Redcarpet_report.txt" (or "<sample>.bk_<N>_...").
+_BK = config["redcarpet"]["bottom_k"]
+_BK_TAG = "bk_all" if (not _BK or str(_BK) == "0") else f"bk_{_BK}"
+
+# Engine selection: "fast" (vendored, byte-identical, much quicker) or
+# "original" (the user's separately-maintained Redcarpet_01062025.py). Both take
+# the same CLI: [-bk N] [--hash_file CSV] <hits_file>, and write the same report.
+_RC_ENGINE = config["redcarpet"].get("engine", "fast")
+if _RC_ENGINE == "fast":
+    _RC_SCRIPT = str(SCRIPTS / "redcarpet_fast.py")
+elif _RC_ENGINE == "original":
+    _RC_SCRIPT = config["redcarpet"]["script"]
+else:
+    raise WorkflowError(
+        f"redcarpet.engine must be 'fast' or 'original', got {_RC_ENGINE!r}")
+
+rule redcarpet:
+    input:
+        unpack(lambda wc: {"hits": str(RESULTS / wc.sample / f"{wc.sample}.WhatsGNU_hits.txt")}),
+        unpack(redcarpet_extra_inputs),
+    output:
+        report = RESULTS / "{sample}" / "redcarpet" / ("{sample}." + _BK_TAG + "_Redcarpet_report.txt"),
+    params:
+        script   = _RC_SCRIPT,
+        bottom_k = config["redcarpet"]["bottom_k"],
+        rc_dir   = lambda wc: str(sample_dir(wc.sample) / "redcarpet"),
+        backend  = BACKEND,
+        # Empty for atb; the strain-hash CSV path for classic. Referenced as a
+        # param (not {input.hash_csv}) so the shell template formats cleanly
+        # regardless of backend.
+        hash_csv = lambda wc: (str(RESULTS / wc.sample / f"{wc.sample}.strain_hashes.csv")
+                               if BACKEND == "classic" else ""),
+    log:
+        RESULTS / "{sample}" / "logs" / "redcarpet.log"
+    shell:
+        r"""
+        mkdir -p {params.rc_dir} $(dirname {log})
+        # Redcarpet writes outputs next to its input file, so run it inside
+        # rc_dir on a local copy named <sample>.WhatsGNU_hits.txt. Resolve the
+        # script (and hash file) to absolute paths first, since `cd` would break
+        # any relative path passed on the command line.
+        RC_SCRIPT=$(python -c "import os,sys;print(os.path.abspath(sys.argv[1]))" {params.script})
+        LOG_ABS=$(python -c "import os,sys;print(os.path.abspath(sys.argv[1]))" {log})
+        cp {input.hits} {params.rc_dir}/{wildcards.sample}.WhatsGNU_hits.txt
+        bk_flag=""
+        if [ "{params.bottom_k}" != "0" ] && [ -n "{params.bottom_k}" ]; then
+            bk_flag="-bk {params.bottom_k}"
+        fi
+        hash_flag=""
+        if [ "{params.backend}" = "classic" ]; then
+            HASH_ABS=$(python -c "import os,sys;print(os.path.abspath(sys.argv[1]))" {params.hash_csv})
+            hash_flag="--hash_file $HASH_ABS"
+        fi
+        ( cd {params.rc_dir} && \
+          python "$RC_SCRIPT" $bk_flag $hash_flag \
+            {wildcards.sample}.WhatsGNU_hits.txt ) > "$LOG_ABS" 2>&1
+        """
+
+
+# ============================================================================
+# CarpetCleanChangepoints — region detection on the Jaccard matrix
+# ============================================================================
+rule changepoints:
+    input:
+        report = rules.redcarpet.output.report,
+    output:
+        info = RESULTS / "{sample}" / "carpet" / "Information.txt",
+    params:
+        script  = str(Path(workflow.basedir).parent / "Redcarpet" / "CarpetCleanChangepoints.py"),
+        out_dir = lambda wc: str(sample_dir(wc.sample) / "carpet"),
+        sim     = config["changepoints"]["similarity_threshold"],
+        kn      = config["changepoints"]["k_neighbors"],
+    log:
+        RESULTS / "{sample}" / "logs" / "changepoints.log"
+    shell:
+        r"""
+        mkdir -p {params.out_dir} $(dirname {log})
+        # CarpetCleanChangepoints in single mode creates a subfolder named after
+        # the input file stem; redirect its outputs into out_dir, then surface
+        # Information.txt at the top of out_dir as the rule's declared output.
+        python {params.script} \
+            --mode single \
+            -i {input.report} \
+            -o {params.out_dir} \
+            --similarity_threshold {params.sim} \
+            --k_neighbors {params.kn} > {log} 2>&1
+        info=$(find {params.out_dir} -name Information.txt | head -1)
+        cp "$info" {output.info}
+        """
